@@ -1,0 +1,200 @@
+---
+- name: Deploy Grafana Server on master node (Amazon Linux)
+  hosts: ansible
+  connection: local
+  become: yes
+  vars:
+    # Grafana repository configuration for Amazon Linux
+    grafana_repo: |
+      [grafana]
+      name=Grafana
+      baseurl=https://packages.grafana.com/oss/rpm
+      repo_gpgcheck=1
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://packages.grafana.com/gpg.key
+    grafana_datasource_template: "grafana_datasource.j2"
+    grafana_datasource_dest: "/etc/grafana/provisioning/datasources/prometheus.yaml"
+  tasks:
+    - name: Create Grafana repository file
+      copy:
+        dest: /etc/yum.repos.d/grafana.repo
+        content: "{{ grafana_repo }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install Grafana Server
+      yum:
+        name: grafana
+        state: present
+
+    - name: Configure Grafana to bind on all interfaces
+      lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: '^;http_addr ='
+        line: 'http_addr = 0.0.0.0'
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Grafana
+
+    - name: Ensure Grafana service is enabled and started
+      service:
+        name: grafana-server
+        state: started
+        enabled: yes
+
+    - name: Deploy Grafana datasource configuration
+      template:
+        src: "{{ grafana_datasource_template }}"
+        dest: "{{ grafana_datasource_dest }}"
+      notify: Restart Grafana
+
+  handlers:
+    - name: Restart Grafana
+      service:
+        name: grafana-server
+        state: restarted
+
+- name: Deploy Prometheus on all nodes (Amazon Linux)
+  hosts: all
+  become: yes
+  vars:
+    prometheus_version: "2.46.0"
+    prometheus_tarball: "prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+    prometheus_url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/{{ prometheus_tarball }}"
+    prometheus_install_dir: "/opt/prometheus"
+    prometheus_config_template: "prometheus.yml.j2"
+    prometheus_config_dest: "{{ prometheus_install_dir }}/prometheus.yml"
+  tasks:
+    - name: Create Prometheus installation directory
+      file:
+        path: "{{ prometheus_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Download Prometheus tarball
+      get_url:
+        url: "{{ prometheus_url }}"
+        dest: "/tmp/{{ prometheus_tarball }}"
+        mode: '0644'
+
+    - name: Extract Prometheus tarball
+      unarchive:
+        src: "/tmp/{{ prometheus_tarball }}"
+        dest: "{{ prometheus_install_dir }}"
+        remote_src: yes
+        extra_opts: [ "--strip-components=1" ]
+
+    - name: Deploy Prometheus configuration file
+      template:
+        src: "{{ prometheus_config_template }}"
+        dest: "{{ prometheus_config_dest }}"
+      notify: Restart Prometheus
+
+    - name: Create Prometheus systemd service file
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          After=network.target
+
+          [Service]
+          User=root
+          ExecStart={{ prometheus_install_dir }}/prometheus --config.file={{ prometheus_config_dest }} --storage.tsdb.path={{ prometheus_install_dir }}/data
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload systemd
+
+    - name: Ensure Prometheus service is enabled and started
+      service:
+        name: prometheus
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Reload systemd
+      command: systemctl daemon-reload
+      become: yes
+
+    - name: Restart Prometheus
+      service:
+        name: prometheus
+        state: restarted
+
+- name: Deploy Node Exporter on all nodes (Amazon Linux)
+  hosts: all
+  become: yes
+  vars:
+    node_exporter_version: "1.5.0"
+    node_exporter_tarball: "node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+    node_exporter_url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/{{ node_exporter_tarball }}"
+    node_exporter_install_dir: "/opt/node_exporter"
+  tasks:
+    - name: Create Node Exporter installation directory
+      file:
+        path: "{{ node_exporter_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Download Node Exporter tarball
+      get_url:
+        url: "{{ node_exporter_url }}"
+        dest: "/tmp/{{ node_exporter_tarball }}"
+        mode: '0644'
+
+    - name: Extract Node Exporter tarball
+      unarchive:
+        src: "/tmp/{{ node_exporter_tarball }}"
+        dest: "{{ node_exporter_install_dir }}"
+        remote_src: yes
+        extra_opts: [ "--strip-components=1" ]
+
+    - name: Create systemd service file for Node Exporter
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=root
+          ExecStart={{ node_exporter_install_dir }}/node_exporter
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - Reload systemd
+        - Restart Node Exporter
+
+    - name: Ensure Node Exporter service is enabled and started
+      service:
+        name: node_exporter
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Reload systemd
+      command: systemctl daemon-reload
+      become: yes
+
+    - name: Restart Node Exporter
+      service:
+        name: node_exporter
+        state: restarted
